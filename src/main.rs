@@ -1,21 +1,22 @@
 mod models;
 
-use std::sync::Arc;
+use std::{iter::Filter, sync::Arc};
 
 use axum::{
     Json, Router,
-    extract::State,
+    extract::{Query, State},
     http::StatusCode,
     routing::{get, post},
 };
+use serde::Serializer;
 use serde_json::{Value, json};
-use tokio::{net::TcpListener, sync::Mutex};
+use tokio::{net::TcpListener, sync::RwLock};
 
-use crate::models::log_event::LogEvent;
+use crate::models::log_event::{LogEvent, LogQuery};
 
 #[derive(Clone, Default)]
 struct AppState {
-    events: Arc<Mutex<Vec<LogEvent>>>,
+    events: Arc<RwLock<Vec<LogEvent>>>,
 }
 
 #[tokio::main]
@@ -34,7 +35,7 @@ async fn main() {
 fn create_app(state: AppState) -> Router {
     Router::new()
         .route("/health", get(health_handler))
-        .route("/v1/logs", post(post_handler))
+        .route("/v1/logs", get(get_handler).post(post_handler))
         .with_state(state)
 }
 
@@ -42,8 +43,30 @@ async fn health_handler() -> Json<Value> {
     Json(json!({ "status": "ok" }))
 }
 
+async fn get_handler(
+    State(state): State<AppState>,
+    Query(query): Query<LogQuery>,
+) -> Json<Vec<LogEvent>> {
+    let events = state.events.read().await;
+    let result: Vec<LogEvent> = events
+        .iter()
+        .filter(|event| match &query.level {
+            Some(level) => event.level == *level,
+            None => true,
+        })
+        .filter(|event| match &query.service {
+            Some(service) => event.service == *service,
+            None => true,
+        })
+        .take(query.limit.unwrap_or(100).min(1000))
+        .cloned()
+        .collect();
+
+    Json(result)
+}
+
 async fn post_handler(State(state): State<AppState>, Json(body): Json<LogEvent>) -> StatusCode {
-    let mut events = state.events.lock().await;
+    let mut events = state.events.write().await;
     events.push(body);
 
     StatusCode::CREATED
@@ -51,11 +74,135 @@ async fn post_handler(State(state): State<AppState>, Json(body): Json<LogEvent>)
 
 #[cfg(test)]
 mod tests {
+    use axum_test::TestServer;
     use chrono::Utc;
 
     use crate::models::log_event::LogLevel;
 
     use super::*;
+
+    fn filter_events() -> Vec<LogEvent> {
+        [
+            (LogLevel::Info, "Other", "Other service started"),
+            (LogLevel::Error, "Lievito", "Printer connection failed"),
+            (LogLevel::Error, "Other", "Other service failed"),
+            (LogLevel::Info, "Lievito", "Lievito started"),
+        ]
+        .into_iter()
+        .map(|(level, service, message)| {
+            LogEvent::new(
+                "2026-10-06T13:26:13Z".parse().unwrap(),
+                level,
+                service,
+                message,
+            )
+        })
+        .collect()
+    }
+
+    fn server_with_events(events: Vec<LogEvent>) -> TestServer {
+        let state = AppState {
+            events: Arc::new(RwLock::new(events)),
+        };
+        TestServer::new(create_app(state))
+    }
+
+    #[tokio::test]
+    async fn test_get_logs_empty() {
+        let server = server_with_events(vec![]);
+
+        let response = server.get("/v1/logs").await;
+
+        response.assert_status_ok();
+        response.assert_json(&json!([]));
+    }
+
+    #[tokio::test]
+    async fn test_post_then_get_logs() {
+        let server = server_with_events(vec![]);
+        let event = filter_events().remove(1);
+
+        let response = server.post("/v1/logs").json(&event).await;
+        response.assert_status(StatusCode::CREATED);
+
+        let response = server.get("/v1/logs").await;
+
+        response.assert_status_ok();
+        response.assert_json(&vec![event]);
+    }
+
+    #[tokio::test]
+    async fn test_get_logs_filter_by_level() {
+        let events = filter_events();
+        let server = server_with_events(events.clone());
+
+        let response = server.get("/v1/logs?level=error").await;
+
+        response.assert_status_ok();
+        response.assert_json(&vec![events[1].clone(), events[2].clone()]);
+    }
+
+    #[tokio::test]
+    async fn test_get_logs_filter_by_service() {
+        let events = filter_events();
+        let server = server_with_events(events.clone());
+
+        let response = server.get("/v1/logs?service=Lievito").await;
+
+        response.assert_status_ok();
+        response.assert_json(&vec![events[1].clone(), events[3].clone()]);
+    }
+
+    #[tokio::test]
+    async fn test_get_logs_filter_by_level_and_service() {
+        let events = filter_events();
+        let server = server_with_events(events.clone());
+
+        let response = server.get("/v1/logs?level=error&service=Lievito").await;
+
+        response.assert_status_ok();
+        response.assert_json(&vec![events[1].clone()]);
+    }
+
+    #[tokio::test]
+    async fn test_get_logs_limit() {
+        let events = filter_events();
+        let server = server_with_events(events.clone());
+
+        let response = server.get("/v1/logs?limit=2").await;
+
+        response.assert_status_ok();
+        response.assert_json(&events[..2].to_vec());
+    }
+
+    #[tokio::test]
+    async fn test_get_logs_limit_capped_at_1000() {
+        let events: Vec<LogEvent> = (0..1001)
+            .map(|index| {
+                LogEvent::new(
+                    "2026-10-06T13:26:13Z".parse().unwrap(),
+                    LogLevel::Error,
+                    "Lievito",
+                    &format!("Event {index}"),
+                )
+            })
+            .collect();
+        let server = server_with_events(events.clone());
+
+        let response = server.get("/v1/logs?limit=50000").await;
+
+        response.assert_status_ok();
+        response.assert_json(&events[..1000].to_vec());
+    }
+
+    #[tokio::test]
+    async fn test_get_logs_invalid_level() {
+        let server = server_with_events(filter_events());
+
+        let response = server.get("/v1/logs?level=invalid").await;
+
+        assert!(response.status_code().is_client_error());
+    }
 
     #[tokio::test]
     async fn test_health() {
@@ -89,7 +236,7 @@ mod tests {
         let response = server.post("/v1/logs").json(&payload).await;
         response.assert_status(StatusCode::CREATED);
 
-        let events = state.events.lock().await;
+        let events = state.events.read().await;
         assert_eq!(events.len(), 1);
         assert_eq!(events[0].message, "Printer connection failed");
     }
@@ -114,7 +261,7 @@ mod tests {
 
         assert!(response.status_code().is_client_error());
 
-        let events = state.events.lock().await;
+        let events = state.events.read().await;
         assert!(events.is_empty());
     }
 

@@ -34,3 +34,10 @@ pub enum LogLevel {
     Warn,
     Error,
 }
+
+#[derive(Deserialize)]
+pub struct LogQuery {
+    pub level: Option<LogLevel>,
+    pub service: Option<String>,
+    pub limit: Option<usize>,
+}
