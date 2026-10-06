@@ -8,6 +8,8 @@ version = "0.1.0"
 dependencies = [
  "axum",
  "axum-test",
+ "chrono",
+ "serde",
  "serde_json",
  "tokio",
  "tower",
@@ -190,6 +192,7 @@ dependencies = [
  "iana-time-zone",
  "js-sys",
  "num-traits",
+ "serde",
  "wasm-bindgen",
  "windows-link",
 ]
