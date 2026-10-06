@@ -1,0 +1,8 @@
+[package]
+name = "aevum-telemetry"
+version = "0.1.0"
+edition = "2024"
+description = "An experimental telemetry and observability platform for learning Rust"
+license = "MIT"
+
+[dependencies]
