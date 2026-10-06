@@ -53,6 +53,8 @@ async fn post_handler(State(state): State<AppState>, Json(body): Json<LogEvent>)
 mod tests {
     use chrono::Utc;
 
+    use crate::models::log_event::LogLevel;
+
     use super::*;
 
     #[tokio::test]
@@ -92,6 +94,30 @@ mod tests {
         assert_eq!(events[0].message, "Printer connection failed");
     }
 
+    #[tokio::test]
+    async fn test_post_invalid_log() {
+        use axum_test::TestServer;
+
+        let state = AppState::default();
+        let app = create_app(state.clone());
+        let server = TestServer::new(app);
+
+        let response = server
+            .post("/v1/logs")
+            .json(&json!({
+                "timestamp": "2026-10-06T13:26:13Z",
+                "level": "critical",
+                "service": "Lievito",
+                "message": "Printer connection failed"
+            }))
+            .await;
+
+        assert!(response.status_code().is_client_error());
+
+        let events = state.events.lock().await;
+        assert!(events.is_empty());
+    }
+
     #[test]
     fn test_serialize() {
         use crate::models::log_event::LogLevel;
@@ -114,17 +140,19 @@ mod tests {
     #[test]
     fn test_deserialize() {
         let json = r#"
-            {
-                "timesta: "2026-10-06T13:26:13Z",
-                "level": "critical",
-                "service": "lievito",
-                "message": "Printer failed"
-            }
-            "#;
+        {
+            "timestamp": "2026-10-06T13:26:13Z",
+            "level": "error",
+            "service": "lievito",
+            "message": "Printer failed"
+        }
+        "#;
 
-        let result = serde_json::from_str::<LogEvent>(json);
+        let event = serde_json::from_str::<LogEvent>(json).unwrap();
 
-        assert!(result.is_err());
+        assert_eq!(event.level, LogLevel::Error);
+        assert_eq!(event.service, "lievito");
+        assert_eq!(event.message, "Printer failed");
     }
 
     #[test]
@@ -164,6 +192,7 @@ mod tests {
             {
                 "timestamp": "2026-10-:13Z",
                 "level": "error",
+                "service": "lievito",
                 "message": "Printer failed"
             }
             "#;
