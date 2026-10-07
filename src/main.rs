@@ -68,6 +68,13 @@ async fn get_handler(
     if query.service.is_some() {
         sql.push_str(" AND service = ?");
     }
+    if query.from.is_some() && query.to.is_some() {
+        sql.push_str(" AND timestamp BETWEEN fromUnixTimestamp64Milli(?, 'UTC') AND fromUnixTimestamp64Milli(?, 'UTC')");
+    } else if query.from.is_some() {
+        sql.push_str(" AND timestamp >= fromUnixTimestamp64Milli(?, 'UTC')");
+    } else if query.to.is_some() {
+        sql.push_str(" AND timestamp <= fromUnixTimestamp64Milli(?, 'UTC')");
+    }
 
     sql.push_str(" ORDER BY timestamp DESC LIMIT ?");
 
@@ -77,6 +84,13 @@ async fn get_handler(
     }
     if let Some(service) = query.service {
         q = q.bind(service);
+    }
+
+    if let Some(from) = query.from {
+        q = q.bind(from.timestamp_millis());
+    }
+    if let Some(to) = query.to {
+        q = q.bind(to.timestamp_millis());
     }
 
     q = q.bind(query.limit.unwrap_or(100).min(1000));

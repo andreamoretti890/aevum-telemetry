@@ -104,6 +104,8 @@ pub struct LogQuery {
     pub level: Option<LogLevel>,
     pub service: Option<String>,
     pub limit: Option<usize>,
+    pub from: Option<DateTime<Utc>>,
+    pub to: Option<DateTime<Utc>>,
 }
 
 #[cfg(test)]
