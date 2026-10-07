@@ -11,8 +11,10 @@ those needs rather than start at production scale.
 
 ## Current state
 
-The repository contains Cargo's starter binary, which prints `Hello, world!`.
-There are no telemetry features or external dependencies yet.
+The HTTP API accepts logs at `POST /v1/logs` and reads them from ClickHouse at
+`GET /v1/logs`. Reads support `service`, `level`, and `limit` query parameters,
+return newest logs first, and default to 100 results with a maximum of 1000.
+Storage failures return HTTP 500. `/health` reports that the HTTP server is running.
 
 ## Getting started
 
@@ -25,7 +27,20 @@ cargo test
 cargo clippy -- -D warnings
 ```
 
-There are no tests yet. Tests will accompany behavior as it is implemented.
+`cargo test` runs the tests that need no database. To include the ClickHouse
+round-trip and API tests, start ClickHouse, then run:
+
+```sh
+set -a
+source .env
+set +a
+cargo test -- --include-ignored
+```
+
+The API test creates and removes a temporary database, so the test user needs
+permission to create databases. It checks storage, filters, ordering, limits,
+and reads after recreating the app. The default suite also checks HTTP 500
+responses when ClickHouse rejects requests or cannot be reached.
 
 ## Local ClickHouse
 
@@ -56,8 +71,19 @@ start it again. Data and server logs live in Docker named volumes and survive
 container recreation. `docker compose down` also preserves them; adding `-v`
 deletes the database and logs.
 
-This sets up the database for development. The Rust app still stores events in
-memory; connecting it to ClickHouse is a separate implementation step.
+Before running the app, create its table in the SQL client:
+
+```sql
+CREATE TABLE IF NOT EXISTS logs (
+    timestamp DateTime64(3, 'UTC'),
+    level Enum8('trace' = 0, 'debug' = 1, 'info' = 2, 'warn' = 3, 'error' = 4),
+    service String,
+    message String
+) ENGINE = MergeTree ORDER BY timestamp;
+```
+
+`cargo run` loads credentials from `.env` and serves the API at
+`http://127.0.0.1:3000`. Logs remain in ClickHouse when Aevum restarts.
 
 Setup follows the [official ClickHouse Docker guide](https://clickhouse.com/docs/get-started/setup/self-managed/docker).
 

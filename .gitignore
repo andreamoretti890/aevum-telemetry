@@ -4,6 +4,10 @@
 # Local ClickHouse credentials
 /.env
 
+# Local agent skills
+/.agents/
+/skills-lock.json
+
 # macOS metadata
 .DS_Store
 ._*
