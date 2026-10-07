@@ -1,18 +1,20 @@
 mod models;
 
-use std::{iter::Filter, sync::Arc};
+use std::{env, sync::Arc};
 
 use axum::{
     Json, Router,
     extract::{Query, State},
     http::StatusCode,
-    routing::{get, post},
+    routing::get,
 };
-use serde::Serializer;
+use chrono::Utc;
+use clickhouse::{Client, insert::Insert, sql::Identifier};
 use serde_json::{Value, json};
 use tokio::{net::TcpListener, sync::RwLock};
 
-use crate::models::log_event::{LogEvent, LogQuery};
+use crate::models::log_event::{LogEvent, LogLevel, LogQuery, LogRowConversionError};
+use crate::models::log_row::LogRow;
 
 #[derive(Clone, Default)]
 struct AppState {
@@ -20,16 +22,59 @@ struct AppState {
 }
 
 #[tokio::main]
-async fn main() {
+async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let client = Client::default()
+        // Match the Rust client's LZ4 decoder; ClickHouse 26.9 defaults to ZSTD.
+        .with_setting("network_compression_method", "lz4")
+        .with_url(env::var("CLICKHOUSE_URL").unwrap_or_else(|_| "http://127.0.0.1:8123".into()))
+        .with_database(read_env_var("CLICKHOUSE_DB"))
+        .with_user(read_env_var("CLICKHOUSE_USER"))
+        .with_password(read_env_var("CLICKHOUSE_PASSWORD"));
+
+    let table_name = "logs";
+    let mut insert: Insert<LogRow> = client.insert::<LogRow>(table_name).await?;
+    insert
+        .write(&LogRow::from(LogEvent::new(
+            Utc::now(),
+            LogLevel::Debug,
+            "service-test1",
+            "Test2",
+        )))
+        .await?;
+    insert
+        .write(&LogRow::from(LogEvent::new(
+            Utc::now(),
+            LogLevel::Debug,
+            "service-test2",
+            "Test2",
+        )))
+        .await?;
+    insert.end().await?;
+
+    let logs = client
+        .query("SELECT ?fields FROM ? ORDER BY timestamp DESC")
+        .bind(Identifier(table_name))
+        .fetch_all::<LogRow>()
+        .await?;
+
+    let log_events = logs
+        .iter()
+        .map(LogEvent::try_from)
+        .collect::<Result<Vec<LogEvent>, LogRowConversionError>>()?;
+    println!("{log_events:#?}");
+
     let state: AppState = AppState::default();
     let app: Router = create_app(state);
-    let listener: TcpListener = tokio::net::TcpListener::bind("127.0.0.1:3000")
-        .await
-        .unwrap();
+    let listener: TcpListener = tokio::net::TcpListener::bind("127.0.0.1:3000").await?;
 
     println!("Server running on http://127.0.0.1:3000");
 
-    axum::serve(listener, app).await.unwrap();
+    axum::serve(listener, app).await?;
+    Ok(())
+}
+
+fn read_env_var(key: &str) -> String {
+    env::var(key).unwrap_or_else(|_| panic!("{key} env variable should be set"))
 }
 
 fn create_app(state: AppState) -> Router {

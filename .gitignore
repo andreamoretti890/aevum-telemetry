@@ -1,6 +1,9 @@
 # Rust build output
 /target/
 
+# Local ClickHouse credentials
+/.env
+
 # macOS metadata
 .DS_Store
 ._*

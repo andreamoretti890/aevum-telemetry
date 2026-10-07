@@ -1,0 +1,31 @@
+name: aevum
+
+services:
+  clickhouse:
+    image: clickhouse/clickhouse-server:26.9.11.2
+    ports:
+      - "127.0.0.1:8123:8123"
+      - "127.0.0.1:9000:9000"
+    environment:
+      CLICKHOUSE_DB: ${CLICKHOUSE_DB:-aevum}
+      CLICKHOUSE_USER: ${CLICKHOUSE_USER:-aevum}
+      CLICKHOUSE_PASSWORD: ${CLICKHOUSE_PASSWORD:?Set CLICKHOUSE_PASSWORD in .env}
+    volumes:
+      - clickhouse_data:/var/lib/clickhouse
+      - clickhouse_logs:/var/log/clickhouse-server
+    ulimits:
+      nofile:
+        soft: 262144
+        hard: 262144
+    healthcheck:
+      test:
+        - CMD-SHELL
+        - clickhouse-client --user "$$CLICKHOUSE_USER" --password "$$CLICKHOUSE_PASSWORD" --query 'SELECT 1'
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 30s
+
+volumes:
+  clickhouse_data:
+  clickhouse_logs:
