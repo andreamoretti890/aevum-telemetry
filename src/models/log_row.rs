@@ -51,7 +51,7 @@ mod tests {
             .with_password(std::env::var("CLICKHOUSE_PASSWORD")?);
         let table = format!("_log_row_test_{}", std::process::id());
         client
-            .query("CREATE TABLE ? (timestamp DateTime64(3, 'UTC'), level Enum8('trace' = 0, 'debug' = 1, 'info' = 2, 'warn' = 3, 'error' = 4), service String, message String) ENGINE = MergeTree ORDER BY timestamp")
+            .query("CREATE TABLE ? (timestamp DateTime64(3, 'UTC'), level Enum8('trace' = 0, 'debug' = 1, 'info' = 2, 'warn' = 3, 'error' = 4), service String, message String, attributes String) ENGINE = MergeTree ORDER BY timestamp")
             .bind(Identifier(&table))
             .execute()
             .await?;
@@ -66,7 +66,16 @@ mod tests {
                 LogLevel::Warn,
                 LogLevel::Error,
             ] {
-                let row = LogRow::from(LogEvent::new(Utc::now(), level, "service-test", "Test"));
+                let row = LogRow::from(LogEvent::new(
+                    Utc::now(),
+                    level,
+                    "service-test",
+                    "Test",
+                    serde_json::json!({"printer": "receipt", "retries": 2})
+                        .as_object()
+                        .unwrap()
+                        .clone(),
+                ));
                 insert.write(&row).await?;
                 expected.push(row);
             }

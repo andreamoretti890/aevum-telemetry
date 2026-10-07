@@ -120,7 +120,11 @@ mod tests {
             LogLevel::Warn,
             LogLevel::Error,
         ] {
-            let event = LogEvent::new(timestamp, level, "service-test", "Test");
+            let attributes = serde_json::json!({"printer": "receipt", "retries": 2})
+                .as_object()
+                .unwrap()
+                .clone();
+            let event = LogEvent::new(timestamp, level, "service-test", "Test", attributes);
             let row = LogRow::from(event.clone());
             assert_eq!(LogEvent::try_from(&row).unwrap(), event);
         }
@@ -130,6 +134,7 @@ mod tests {
             LogLevel::Debug,
             "service-test",
             "Test",
+            Map::new(),
         ));
         row.level = 5;
         assert!(matches!(

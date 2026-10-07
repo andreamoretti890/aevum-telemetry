@@ -9,6 +9,10 @@ fn event() -> LogEvent {
         LogLevel::Debug,
         "service-test2",
         "Test",
+        json!({"printer": "receipt", "retries": 2, "context": {"online": false}})
+            .as_object()
+            .unwrap()
+            .clone(),
     )
 }
 
@@ -128,7 +132,7 @@ async fn clickhouse_logs_api() {
     let test_client = client.clone().with_database(&database);
     // Run assertions in a task so cleanup also happens after an assertion panic.
     let result = tokio::spawn(async move {
-        test_client.query("CREATE TABLE logs (timestamp DateTime64(3, 'UTC'), level Enum8('trace' = 0, 'debug' = 1, 'info' = 2, 'warn' = 3, 'error' = 4), service String, message String) ENGINE = MergeTree ORDER BY timestamp")
+        test_client.query("CREATE TABLE logs (timestamp DateTime64(3, 'UTC'), level Enum8('trace' = 0, 'debug' = 1, 'info' = 2, 'warn' = 3, 'error' = 4), service String, message String, attributes String) ENGINE = MergeTree ORDER BY timestamp")
             .execute().await.unwrap();
         let server = TestServer::new(create_app(AppState { client: test_client.clone() }));
         let response = server.get("/v1/logs").await;
@@ -140,7 +144,7 @@ async fn clickhouse_logs_api() {
             (4, LogLevel::Debug, "service-test1"),
             (2, LogLevel::Info, "service-test2"),
         ].into_iter().map(|(second, level, service)| {
-            LogEvent::new(format!("2026-10-07T08:00:0{second}.123Z").parse().unwrap(), level, service, "Test")
+            LogEvent::new(format!("2026-10-07T08:00:0{second}.123Z").parse().unwrap(), level, service, "Test", event().attributes)
         }).collect();
         for event in &events {
             server.post("/v1/logs").json(event).await.assert_status(StatusCode::CREATED);
@@ -198,6 +202,7 @@ fn test_serialize() {
         LogLevel::Error,
         "Lievito",
         "Printer connection failed",
+        event().attributes,
     );
 
     let json = serde_json::to_value(&event).unwrap();
@@ -206,6 +211,10 @@ fn test_serialize() {
     assert_eq!(json["level"], "error");
     assert_eq!(json["service"], "Lievito");
     assert_eq!(json["message"], "Printer connection failed");
+    assert_eq!(
+        json["attributes"],
+        serde_json::to_value(&event.attributes).unwrap()
+    );
 }
 
 #[test]
@@ -215,7 +224,8 @@ fn test_deserialize() {
             "timestamp": "2026-10-06T13:26:13Z",
             "level": "error",
             "service": "lievito",
-            "message": "Printer failed"
+            "message": "Printer failed",
+            "attributes": {"printer": "receipt", "retries": 2, "context": {"online": false}}
         }
         "#;
 
@@ -224,6 +234,7 @@ fn test_deserialize() {
     assert_eq!(event.level, LogLevel::Error);
     assert_eq!(event.service, "lievito");
     assert_eq!(event.message, "Printer failed");
+    assert_eq!(event.attributes, self::event().attributes);
 }
 
 #[test]
@@ -233,7 +244,8 @@ fn test_invalid_level() {
                 "timestamp": "2026-10-06T13:26:13Z",
                 "level": "critical",
                 "service": "lievito",
-                "message": "Printer failed"
+                "message": "Printer failed",
+                "attributes": {}
             }
             "#;
 
@@ -248,7 +260,8 @@ fn test_missing_service() {
             {
                 "timestamp": "2026-10-06T13:26:13Z",
                 "level": "error",
-                "message": "Printer failed"
+                "message": "Printer failed",
+                "attributes": {}
             }
             "#;
 
@@ -264,7 +277,8 @@ fn test_malformed_timestamp() {
                 "timestamp": "2026-10-:13Z",
                 "level": "error",
                 "service": "lievito",
-                "message": "Printer failed"
+                "message": "Printer failed",
+                "attributes": {}
             }
             "#;
 
