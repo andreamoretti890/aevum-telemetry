@@ -6,7 +6,7 @@ use axum::{
     Json, Router,
     extract::{Query, State},
     http::StatusCode,
-    routing::get,
+    routing::{get, post},
 };
 use clickhouse::{Client, sql::Identifier};
 use serde_json::{Value, json};
@@ -50,6 +50,7 @@ fn create_app(state: AppState) -> Router {
     Router::new()
         .route("/health", get(health_handler))
         .route("/v1/logs", get(get_handler).post(post_handler))
+        .route("/v1/logs/batch", post(batch_post_handler))
         .with_state(state)
 }
 
@@ -121,6 +122,22 @@ async fn post_handler(State(state): State<AppState>, Json(body): Json<LogEvent>)
     }
 
     StatusCode::CREATED
+}
+
+async fn batch_post_handler(
+    State(state): State<AppState>,
+    Json(body): Json<Vec<LogEvent>>,
+) -> StatusCode {
+    let mut inserter = state.client.inserter::<LogRow>("logs");
+    for event in body {
+        if inserter.write(&LogRow::from(event)).await.is_err() {
+            return StatusCode::INTERNAL_SERVER_ERROR;
+        }
+    }
+    match inserter.end().await {
+        Ok(_) => StatusCode::CREATED,
+        Err(_) => StatusCode::INTERNAL_SERVER_ERROR,
+    }
 }
 
 #[cfg(test)]

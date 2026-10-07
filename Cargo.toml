@@ -7,7 +7,7 @@ license = "MIT"
 
 [dependencies]
 axum = "0.8.9"
-clickhouse = { version = "0.15.2", features = ["time"] }
+clickhouse = { version = "0.15.2", features = ["time", "inserter"] }
 chrono = { version = "0.4.45", features = ["serde"] }
 dotenvy = "0.15"
 serde = { version = "1.0.229", features = ["derive"] }
