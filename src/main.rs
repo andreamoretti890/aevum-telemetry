@@ -4,7 +4,7 @@ use std::env;
 
 use axum::{
     Json, Router,
-    extract::{Query, State},
+    extract::{DefaultBodyLimit, Query, State},
     http::StatusCode,
     routing::{get, post},
 };
@@ -52,6 +52,7 @@ fn create_app(state: AppState) -> Router {
         .route("/v1/logs", get(get_handler).post(post_handler))
         .route("/v1/logs/batch", post(batch_post_handler))
         .with_state(state)
+        .layer(DefaultBodyLimit::max(10 * 1024 * 1024))
 }
 
 async fn health_handler() -> Json<Value> {
@@ -128,6 +129,10 @@ async fn batch_post_handler(
     State(state): State<AppState>,
     Json(body): Json<Vec<LogEvent>>,
 ) -> StatusCode {
+    if body.is_empty() {
+        return StatusCode::BAD_REQUEST;
+    }
+
     let mut inserter = state.client.inserter::<LogRow>("logs");
     for event in body {
         if inserter.write(&LogRow::from(event)).await.is_err() {

@@ -25,7 +25,8 @@ impl From<LogEvent> for LogRow {
             },
             service: event.service,
             message: event.message,
-            attributes: serde_json::Value::from(event.attributes).to_string(),
+            attributes: serde_json::to_string(&event.attributes)
+                .expect("JSON attributes must serialize"),
         }
     }
 }

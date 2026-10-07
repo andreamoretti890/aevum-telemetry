@@ -8,6 +8,9 @@
 /.agents/
 /skills-lock.json
 
+# Local Postman files
+/postman/
+
 # macOS metadata
 .DS_Store
 ._*
