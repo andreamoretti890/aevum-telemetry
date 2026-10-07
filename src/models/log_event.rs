@@ -1,5 +1,6 @@
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
+use serde_json::{Map, Value};
 
 use crate::models::log_row::LogRow;
 
@@ -9,6 +10,7 @@ pub struct LogEvent {
     pub level: LogLevel,
     pub service: String,
     pub message: String,
+    pub attributes: Map<String, Value>,
 }
 
 impl LogEvent {
@@ -17,12 +19,14 @@ impl LogEvent {
         level: LogLevel,
         service: &str,
         message: &str,
+        attributes: Map<String, Value>,
     ) -> LogEvent {
         LogEvent {
             timestamp,
             level,
             service: service.to_string(),
             message: message.to_string(),
+            attributes,
         }
     }
 }
@@ -44,7 +48,13 @@ impl TryFrom<&LogRow> for LogEvent {
 
         let level = LogLevel::try_from(row.level)?;
 
-        Ok(LogEvent::new(timestamp, level, &row.service, &row.message))
+        Ok(LogEvent::new(
+            timestamp,
+            level,
+            &row.service,
+            &row.message,
+            serde_json::from_str(&row.attributes).unwrap_or_default(),
+        ))
     }
 }
 

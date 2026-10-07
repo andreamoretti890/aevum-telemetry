@@ -9,6 +9,7 @@ pub struct LogRow {
     pub level: i8,
     pub service: String,
     pub message: String,
+    pub attributes: String,
 }
 
 impl From<LogEvent> for LogRow {
@@ -24,6 +25,7 @@ impl From<LogEvent> for LogRow {
             },
             service: event.service,
             message: event.message,
+            attributes: serde_json::Value::from(event.attributes).to_string(),
         }
     }
 }
