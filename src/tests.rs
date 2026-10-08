@@ -1,6 +1,6 @@
 use super::*;
 use crate::models::log_event::LogLevel;
-use axum_test::TestServer;
+use axum_test::{TestResponse, TestServer};
 use clickhouse::test::{Mock, handlers};
 
 fn event() -> LogEvent {
@@ -20,6 +20,16 @@ fn mock_server(mock: &Mock) -> TestServer {
     TestServer::new(create_app(AppState {
         client: Client::default().with_url(mock.url()),
     }))
+}
+
+fn assert_api_error(response: &TestResponse, status: StatusCode, code: &str) -> Value {
+    response.assert_status(status);
+    assert_eq!(response.content_type(), "application/json");
+    let body = response.json::<Value>();
+    assert_eq!(body["error"]["code"], code);
+    assert!(!body["error"]["message"].as_str().unwrap().is_empty());
+    uuid::Uuid::parse_str(body["error"]["request_id"].as_str().unwrap()).unwrap();
+    body
 }
 
 #[tokio::test]
@@ -53,16 +63,34 @@ async fn test_clickhouse_errors_return_500() {
     let mock = Mock::new();
     let server = mock_server(&mock);
     mock.add(handlers::failure(StatusCode::SERVICE_UNAVAILABLE));
-    server
-        .get("/v1/logs")
-        .await
-        .assert_status(StatusCode::INTERNAL_SERVER_ERROR);
-    mock.add(handlers::failure(StatusCode::SERVICE_UNAVAILABLE));
-    server
-        .post("/v1/logs")
-        .json(&event())
-        .await
-        .assert_status(StatusCode::INTERNAL_SERVER_ERROR);
+    let response = server.get("/v1/logs").await;
+    let read_error = assert_api_error(
+        &response,
+        StatusCode::INTERNAL_SERVER_ERROR,
+        "storage_error",
+    );
+    assert_eq!(read_error["error"]["message"], "failed to read logs");
+    for (path, payload, message) in [
+        ("/v1/logs", json!(event()), "failed to store log"),
+        (
+            "/v1/logs/batch",
+            json!([event(), event()]),
+            "failed to store log batch",
+        ),
+    ] {
+        mock.add(handlers::failure(StatusCode::SERVICE_UNAVAILABLE));
+        let response = server.post(path).json(&payload).await;
+        let error = assert_api_error(
+            &response,
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "storage_error",
+        );
+        assert_eq!(error["error"]["message"], message);
+        assert_ne!(
+            error["error"]["request_id"],
+            read_error["error"]["request_id"]
+        );
+    }
 }
 
 #[tokio::test]
@@ -73,36 +101,171 @@ async fn test_clickhouse_unreachable_returns_500() {
     let server = TestServer::new(create_app(AppState {
         client: Client::default().with_url(format!("http://{address}")),
     }));
-    server
-        .get("/v1/logs")
-        .await
-        .assert_status(StatusCode::INTERNAL_SERVER_ERROR);
-    server
-        .post("/v1/logs")
-        .json(&event())
-        .await
-        .assert_status(StatusCode::INTERNAL_SERVER_ERROR);
+    let response = server.get("/v1/logs").await;
+    assert_api_error(
+        &response,
+        StatusCode::INTERNAL_SERVER_ERROR,
+        "storage_error",
+    );
+    for (path, payload) in [
+        ("/v1/logs", json!(event())),
+        ("/v1/logs/batch", json!([event()])),
+    ] {
+        let response = server.post(path).json(&payload).await;
+        assert_api_error(
+            &response,
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "storage_error",
+        );
+    }
 }
 
 #[tokio::test]
 async fn test_invalid_requests_do_not_access_clickhouse() {
     let mock = Mock::new();
     let server = mock_server(&mock);
-    server
-        .get("/v1/logs?level=invalid")
-        .await
-        .assert_status(StatusCode::BAD_REQUEST);
-    server
-        .get("/v1/logs?limit=-1")
-        .await
-        .assert_status(StatusCode::BAD_REQUEST);
+    for query in [
+        "level=invalid",
+        "limit=-1",
+        "service=%20%20",
+        "from=2026-10-07T09:00:00Z&to=2026-10-07T08:00:00Z",
+    ] {
+        let response = server.get(&format!("/v1/logs?{query}")).await;
+        assert_api_error(&response, StatusCode::BAD_REQUEST, "invalid_request");
+    }
     let mut payload = serde_json::to_value(event()).unwrap();
     payload["level"] = json!("critical");
-    server
+    let response = server.post("/v1/logs").json(&payload).await;
+    assert_api_error(
+        &response,
+        StatusCode::UNPROCESSABLE_ENTITY,
+        "invalid_request",
+    );
+
+    let mut blank_service = event();
+    blank_service.service = " \t".into();
+    let response = server.post("/v1/logs").json(&blank_service).await;
+    let error = assert_api_error(&response, StatusCode::BAD_REQUEST, "invalid_request");
+    assert_eq!(error["error"]["field"], "service");
+
+    let response = server
         .post("/v1/logs")
-        .json(&payload)
+        .text("{")
+        .content_type("application/json")
+        .await;
+    assert_api_error(&response, StatusCode::BAD_REQUEST, "invalid_request");
+    let response = server.post("/v1/logs").text("{}").await;
+    assert_api_error(
+        &response,
+        StatusCode::UNSUPPORTED_MEDIA_TYPE,
+        "invalid_request",
+    );
+}
+
+#[tokio::test]
+async fn test_batch_validates_all_events_before_writing() {
+    // No mock handlers: any attempted database access fails this test.
+    let mock = Mock::new();
+    let server = mock_server(&mock);
+    let response = server
+        .post("/v1/logs/batch")
+        .json(&Vec::<LogEvent>::new())
+        .await;
+    assert_api_error(&response, StatusCode::BAD_REQUEST, "invalid_request");
+
+    let mut invalid = event();
+    invalid.service = " \n".into();
+    let response = server
+        .post("/v1/logs/batch")
+        .json(&vec![event(), invalid.clone(), invalid])
+        .await;
+    let error = assert_api_error(&response, StatusCode::BAD_REQUEST, "invalid_request");
+    assert_eq!(error["error"]["field"], "service");
+    assert_eq!(error["error"]["event_index"], 1);
+
+    let response = server
+        .post("/v1/logs/batch")
+        .json(&vec![event(); 1001])
+        .await;
+    let error = assert_api_error(&response, StatusCode::PAYLOAD_TOO_LARGE, "batch_too_large");
+    assert_eq!(error["error"]["limit"], 1000);
+}
+
+#[tokio::test]
+async fn test_batch_accepts_limit_and_preserves_events() {
+    let mock = Mock::new();
+    let insert = mock.add(handlers::record::<LogRow>());
+    let server = mock_server(&mock);
+    let mut events = vec![event(); 1000];
+    events[0].message.clear();
+    events[999].message = "last event".into();
+    server
+        .post("/v1/logs/batch")
+        .json(&events)
         .await
-        .assert_status(StatusCode::UNPROCESSABLE_ENTITY);
+        .assert_status(StatusCode::CREATED);
+    assert_eq!(
+        insert.collect::<Vec<LogRow>>().await,
+        events.into_iter().map(LogRow::from).collect::<Vec<_>>()
+    );
+}
+
+#[tokio::test]
+async fn test_oversized_bodies_return_structured_errors() {
+    let mock = Mock::new();
+    let server = mock_server(&mock);
+    let mut oversized = event();
+    oversized.message = "x".repeat(10 * 1024 * 1024);
+    for (path, payload) in [
+        ("/v1/logs", json!(&oversized)),
+        ("/v1/logs/batch", json!([&oversized])),
+    ] {
+        let response = server.post(path).json(&payload).await;
+        let error = assert_api_error(
+            &response,
+            StatusCode::PAYLOAD_TOO_LARGE,
+            "payload_too_large",
+        );
+        assert_eq!(error["error"]["limit"], 10 * 1024 * 1024);
+    }
+}
+
+#[tokio::test]
+async fn test_invalid_stored_rows_fail_the_whole_query() {
+    let mock = Mock::new();
+    let server = mock_server(&mock);
+    let mut bad_level = LogRow::from(event());
+    bad_level.level = 5;
+    let mut bad_timestamp = LogRow::from(event());
+    bad_timestamp.timestamp = i64::MAX;
+    let mut bad_attributes = LogRow::from(event());
+    bad_attributes.attributes = "broken JSON".into();
+    for row in [bad_level, bad_timestamp, bad_attributes] {
+        mock.add(handlers::provide(vec![LogRow::from(event()), row]));
+        let response = server.get("/v1/logs").await;
+        let error = assert_api_error(
+            &response,
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "stored_log_invalid",
+        );
+        assert_eq!(
+            error["error"]["message"],
+            "a stored log could not be decoded"
+        );
+    }
+}
+
+#[tokio::test]
+async fn test_routing_errors_use_the_error_envelope() {
+    let server = TestServer::new(create_app(AppState::default()));
+    let response = server.get("/missing").await;
+    assert_api_error(&response, StatusCode::NOT_FOUND, "not_found");
+    let response = server.delete("/v1/logs").await;
+    assert_api_error(
+        &response,
+        StatusCode::METHOD_NOT_ALLOWED,
+        "method_not_allowed",
+    );
 }
 
 #[tokio::test]

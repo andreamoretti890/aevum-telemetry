@@ -1,20 +1,52 @@
 # Aevum
 
-Aevum (`aevum-telemetry`) is an experimental telemetry and observability platform
-written in Rust. It is a personal learning and portfolio project: the goal is to
-learn Rust while progressively building a real system.
-
-The long-term direction is to ingest telemetry, process it asynchronously, store
-it efficiently, and query it. Development will happen incrementally, with each
-step introducing a concrete problem to solve. The architecture will grow with
-those needs rather than start at production scale.
+Aevum (`aevum-telemetry`) is a telemetry and observability platform written in Rust.
+It provides an HTTP API for storing and querying logs in ClickHouse.
 
 ## Current state
 
-The HTTP API accepts logs at `POST /v1/logs` and reads them from ClickHouse at
-`GET /v1/logs`. Reads support `service`, `level`, and `limit` query parameters,
-return newest logs first, and default to 100 results with a maximum of 1000.
-Storage failures return HTTP 500. `/health` reports that the HTTP server is running.
+The HTTP API accepts a log at `POST /v1/logs`, an array of logs at
+`POST /v1/logs/batch`, and reads them from ClickHouse at `GET /v1/logs`.
+Reads support `service`, `level`, `limit`, `from`, and `to` query parameters.
+Time bounds are inclusive. Results are newest first, with 100 results by default
+and limits above 1000 clamped to 1000. `/health` reports that the HTTP server is running.
+
+## API errors and validation
+
+Error responses use the same JSON envelope, including JSON/query parsing errors.
+
+```json
+{
+  "error": {
+    "code": "invalid_request",
+    "message": "service must not be blank",
+    "request_id": "a95f7c76-3bf3-49f7-9fb7-97f3131082c0",
+    "field": "service",
+    "event_index": 1
+  }
+}
+```
+
+Each error response receives a server-generated request ID matching its structured
+log entry on stderr. Internal failures retain their full cause chain in server
+logs; clients receive a safe message and a stable code. Application validation
+errors include `field` and a zero-based `event_index` when applicable. Size errors
+include `limit`, in bytes for body limits and events for batch limits.
+
+- `storage_error`: HTTP 500 when ClickHouse reads or writes fail.
+- `stored_log_invalid`: HTTP 500 when a stored timestamp, level, or attributes
+  cannot be decoded. The whole GET fails instead of returning partial results.
+- `invalid_request`: HTTP 400 for reversed time bounds, empty batches, or blank
+  service names. Empty messages are allowed. Parsing errors retain Axum's statuses:
+  400 for malformed JSON/query parameters, 422 for invalid JSON field values or
+  missing required fields, and 415 for missing/unsupported JSON content types.
+- `batch_too_large`: HTTP 413 above 1000 events.
+- `payload_too_large`: HTTP 413 above 10 MiB, on both POST endpoints.
+- `not_found` and `method_not_allowed`: HTTP 404 and 405 respectively.
+
+Batch validation stops at the first invalid event, before any insert starts.
+A storage failure does not guarantee that no rows were written; retrying a failed
+write can produce duplicates.
 
 ## Getting started
 
@@ -78,7 +110,8 @@ CREATE TABLE IF NOT EXISTS logs (
     timestamp DateTime64(3, 'UTC'),
     level Enum8('trace' = 0, 'debug' = 1, 'info' = 2, 'warn' = 3, 'error' = 4),
     service String,
-    message String
+    message String,
+    attributes String
 ) ENGINE = MergeTree ORDER BY timestamp;
 ```
 
@@ -87,11 +120,7 @@ CREATE TABLE IF NOT EXISTS logs (
 
 Setup follows the [official ClickHouse Docker guide](https://clickhouse.com/docs/get-started/setup/self-managed/docker).
 
-## Learning approach
-
-I write the Rust implementation myself. AI assistance is for explanations, hints,
-small next steps, and code review. Each milestone should leave me able to explain
-the code and its tradeoffs.
+## Roadmap
 
 See [ROADMAP.md](ROADMAP.md) for the planned milestones.
 

@@ -34,9 +34,11 @@ impl LogEvent {
 #[derive(Debug, thiserror::Error)]
 pub enum LogRowConversionError {
     #[error("invalid timestamp in milliseconds: {0}")]
-    InvalidTimestamp(i64),
+    Timestamp(i64),
     #[error(transparent)]
-    InvalidLevel(#[from] InvalidLogLevel),
+    Level(#[from] InvalidLogLevel),
+    #[error("invalid stored log attributes")]
+    Attributes(#[from] serde_json::Error),
 }
 
 impl TryFrom<&LogRow> for LogEvent {
@@ -44,7 +46,7 @@ impl TryFrom<&LogRow> for LogEvent {
 
     fn try_from(row: &LogRow) -> Result<Self, Self::Error> {
         let timestamp = DateTime::from_timestamp_millis(row.timestamp)
-            .ok_or(LogRowConversionError::InvalidTimestamp(row.timestamp))?;
+            .ok_or(LogRowConversionError::Timestamp(row.timestamp))?;
 
         let level = LogLevel::try_from(row.level)?;
 
@@ -53,7 +55,7 @@ impl TryFrom<&LogRow> for LogEvent {
             level,
             &row.service,
             &row.message,
-            serde_json::from_str(&row.attributes).unwrap_or_default(),
+            serde_json::from_str(&row.attributes)?,
         ))
     }
 }
@@ -141,14 +143,14 @@ mod tests {
         row.level = 5;
         assert!(matches!(
             LogEvent::try_from(&row),
-            Err(LogRowConversionError::InvalidLevel(InvalidLogLevel(5)))
+            Err(LogRowConversionError::Level(InvalidLogLevel(5)))
         ));
 
         row.level = 1;
         row.timestamp = i64::MAX;
         assert!(matches!(
             LogEvent::try_from(&row),
-            Err(LogRowConversionError::InvalidTimestamp(i64::MAX))
+            Err(LogRowConversionError::Timestamp(i64::MAX))
         ));
     }
 }

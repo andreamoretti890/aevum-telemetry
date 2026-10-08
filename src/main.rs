@@ -1,9 +1,11 @@
+mod api_error;
 mod models;
 
 use std::env;
 
 use axum::{
     Json, Router,
+    extract::rejection::{JsonRejection, QueryRejection},
     extract::{DefaultBodyLimit, Query, State},
     http::StatusCode,
     routing::{get, post},
@@ -12,6 +14,7 @@ use clickhouse::{Client, sql::Identifier};
 use serde_json::{Value, json};
 use tokio::net::TcpListener;
 
+use crate::api_error::{ApiError, MAX_BATCH_EVENTS, MAX_BODY_BYTES};
 use crate::models::log_event::{LogEvent, LogQuery, LogRowConversionError};
 use crate::models::log_row::LogRow;
 
@@ -23,6 +26,10 @@ struct AppState {
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     dotenvy::dotenv().ok();
+    tracing_subscriber::fmt()
+        .json()
+        .with_writer(std::io::stderr)
+        .init();
 
     let client = Client::default()
         // Match the Rust client's LZ4 decoder; ClickHouse 26.9 defaults to ZSTD.
@@ -36,7 +43,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let app: Router = create_app(state);
     let listener: TcpListener = tokio::net::TcpListener::bind("127.0.0.1:3000").await?;
 
-    println!("Server running on http://127.0.0.1:3000");
+    tracing::info!(address = "127.0.0.1:3000", "server listening");
 
     axum::serve(listener, app).await?;
     Ok(())
@@ -51,8 +58,10 @@ fn create_app(state: AppState) -> Router {
         .route("/health", get(health_handler))
         .route("/v1/logs", get(get_handler).post(post_handler))
         .route("/v1/logs/batch", post(batch_post_handler))
+        .fallback(|| async { ApiError::NotFound })
+        .method_not_allowed_fallback(|| async { ApiError::MethodNotAllowed })
         .with_state(state)
-        .layer(DefaultBodyLimit::max(10 * 1024 * 1024))
+        .layer(DefaultBodyLimit::max(MAX_BODY_BYTES))
 }
 
 async fn health_handler() -> Json<Value> {
@@ -61,8 +70,21 @@ async fn health_handler() -> Json<Value> {
 
 async fn get_handler(
     State(state): State<AppState>,
-    Query(query): Query<LogQuery>,
-) -> Result<Json<Vec<LogEvent>>, StatusCode> {
+    query: Result<Query<LogQuery>, QueryRejection>,
+) -> Result<Json<Vec<LogEvent>>, ApiError> {
+    let Query(query) = query?;
+    if let (Some(from), Some(to)) = (query.from, query.to)
+        && from > to
+    {
+        return Err(ApiError::InvalidRequest {
+            message: "'from' must be earlier than or equal to 'to'",
+            field: Some("from"),
+            event_index: None,
+        });
+    }
+    if let Some(service) = &query.service {
+        validate_service(service, None)?;
+    }
     let mut sql = "SELECT ?fields FROM ? WHERE 1=1".to_string();
     if query.level.is_some() {
         sql.push_str(" AND level = ?");
@@ -100,49 +122,88 @@ async fn get_handler(
     let events = q
         .fetch_all::<LogRow>()
         .await
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+        .map_err(|source| ApiError::Storage {
+            operation: "read logs",
+            source,
+        })?;
 
     let result = events
         .iter()
         .map(LogEvent::try_from)
-        .collect::<Result<Vec<LogEvent>, LogRowConversionError>>()
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+        .collect::<Result<Vec<LogEvent>, LogRowConversionError>>()?;
 
     Ok(Json(result))
 }
 
-async fn post_handler(State(state): State<AppState>, Json(body): Json<LogEvent>) -> StatusCode {
-    let Ok(mut insert) = state.client.insert::<LogRow>("logs").await else {
-        return StatusCode::INTERNAL_SERVER_ERROR;
+async fn post_handler(
+    State(state): State<AppState>,
+    body: Result<Json<LogEvent>, JsonRejection>,
+) -> Result<StatusCode, ApiError> {
+    let Json(body) = body?;
+    validate_service(&body.service, None)?;
+    let storage_error = |source| ApiError::Storage {
+        operation: "store log",
+        source,
     };
-    if insert.write(&LogRow::from(body)).await.is_err() {
-        return StatusCode::INTERNAL_SERVER_ERROR;
-    }
-    if insert.end().await.is_err() {
-        return StatusCode::INTERNAL_SERVER_ERROR;
-    }
+    let mut insert = state
+        .client
+        .insert::<LogRow>("logs")
+        .await
+        .map_err(storage_error)?;
+    insert
+        .write(&LogRow::from(body))
+        .await
+        .map_err(storage_error)?;
+    insert.end().await.map_err(storage_error)?;
 
-    StatusCode::CREATED
+    Ok(StatusCode::CREATED)
 }
 
 async fn batch_post_handler(
     State(state): State<AppState>,
-    Json(body): Json<Vec<LogEvent>>,
-) -> StatusCode {
+    body: Result<Json<Vec<LogEvent>>, JsonRejection>,
+) -> Result<StatusCode, ApiError> {
+    let Json(body) = body?;
     if body.is_empty() {
-        return StatusCode::BAD_REQUEST;
+        return Err(ApiError::InvalidRequest {
+            message: "batch must contain at least one event",
+            field: None,
+            event_index: None,
+        });
+    }
+    if body.len() > MAX_BATCH_EVENTS {
+        return Err(ApiError::BatchTooLarge {
+            limit: MAX_BATCH_EVENTS,
+        });
+    }
+    for (index, event) in body.iter().enumerate() {
+        validate_service(&event.service, Some(index))?;
     }
 
+    let storage_error = |source| ApiError::Storage {
+        operation: "store log batch",
+        source,
+    };
     let mut inserter = state.client.inserter::<LogRow>("logs");
     for event in body {
-        if inserter.write(&LogRow::from(event)).await.is_err() {
-            return StatusCode::INTERNAL_SERVER_ERROR;
-        }
+        inserter
+            .write(&LogRow::from(event))
+            .await
+            .map_err(storage_error)?;
     }
-    match inserter.end().await {
-        Ok(_) => StatusCode::CREATED,
-        Err(_) => StatusCode::INTERNAL_SERVER_ERROR,
+    inserter.end().await.map_err(storage_error)?;
+    Ok(StatusCode::CREATED)
+}
+
+fn validate_service(service: &str, event_index: Option<usize>) -> Result<(), ApiError> {
+    if service.trim().is_empty() {
+        return Err(ApiError::InvalidRequest {
+            message: "service must not be blank",
+            field: Some("service"),
+            event_index,
+        });
     }
+    Ok(())
 }
 
 #[cfg(test)]

@@ -2,7 +2,7 @@
 name = "aevum-telemetry"
 version = "0.1.0"
 edition = "2024"
-description = "An experimental telemetry and observability platform for learning Rust"
+description = "A telemetry and observability platform backed by ClickHouse"
 license = "MIT"
 
 [dependencies]
@@ -15,6 +15,9 @@ serde_json = "1.0.151"
 thiserror = "2.0.21"
 tokio = { version = "1.53.2", features = ["full"] }
 tower = "0.5.3"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["json"] }
+uuid = { version = "1", features = ["v4"] }
 
 [dev-dependencies]
 axum-test = "21.1.0"
