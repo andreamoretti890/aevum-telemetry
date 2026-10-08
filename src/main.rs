@@ -1,8 +1,6 @@
 mod api_error;
 mod models;
 
-use std::env;
-
 use axum::{
     Json, Router,
     extract::rejection::{JsonRejection, QueryRejection},
@@ -12,20 +10,29 @@ use axum::{
 };
 use clickhouse::{Client, sql::Identifier};
 use serde_json::{Value, json};
+use std::net::SocketAddr;
 use tokio::net::TcpListener;
 
-use crate::api_error::{ApiError, MAX_BATCH_EVENTS, MAX_BODY_BYTES};
 use crate::models::log_event::{LogEvent, LogQuery, LogRowConversionError};
 use crate::models::log_row::LogRow;
+use crate::{
+    api_error::{ApiError, MAX_BATCH_EVENTS, MAX_BODY_BYTES},
+    models::config::Config,
+};
 
 #[derive(Clone, Default)]
 struct AppState {
     client: Client,
+    table: String,
 }
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     dotenvy::dotenv().ok();
+
+    let config = Config::from_env()?;
+    let address = SocketAddr::new(config.host, config.port);
+
     tracing_subscriber::fmt()
         .json()
         .with_writer(std::io::stderr)
@@ -34,23 +41,22 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let client = Client::default()
         // Match the Rust client's LZ4 decoder; ClickHouse 26.9 defaults to ZSTD.
         .with_setting("network_compression_method", "lz4")
-        .with_url(env::var("CLICKHOUSE_URL").unwrap_or_else(|_| "http://127.0.0.1:8123".into()))
-        .with_database(read_env_var("CLICKHOUSE_DB"))
-        .with_user(read_env_var("CLICKHOUSE_USER"))
-        .with_password(read_env_var("CLICKHOUSE_PASSWORD"));
+        .with_url(config.clickhouse_url)
+        .with_database(config.clickhouse_db)
+        .with_user(config.clickhouse_user)
+        .with_password(config.clickhouse_password);
 
-    let state: AppState = AppState { client };
+    let state: AppState = AppState {
+        client,
+        table: config.clickhouse_table,
+    };
     let app: Router = create_app(state);
-    let listener: TcpListener = tokio::net::TcpListener::bind("127.0.0.1:3000").await?;
+    let listener: TcpListener = tokio::net::TcpListener::bind(&address.to_string()).await?;
 
-    tracing::info!(address = "127.0.0.1:3000", "server listening");
+    tracing::info!(address = %address, "server listening");
 
     axum::serve(listener, app).await?;
     Ok(())
-}
-
-fn read_env_var(key: &str) -> String {
-    env::var(key).unwrap_or_else(|_| panic!("{key} env variable should be set"))
 }
 
 fn create_app(state: AppState) -> Router {
@@ -102,7 +108,7 @@ async fn get_handler(
 
     sql.push_str(" ORDER BY timestamp DESC LIMIT ?");
 
-    let mut q = state.client.query(&sql).bind(Identifier("logs"));
+    let mut q = state.client.query(&sql).bind(Identifier(&state.table));
     if let Some(level) = query.level {
         q = q.bind(level);
     }
@@ -147,7 +153,7 @@ async fn post_handler(
     };
     let mut insert = state
         .client
-        .insert::<LogRow>("logs")
+        .insert::<LogRow>(&state.table)
         .await
         .map_err(storage_error)?;
     insert
@@ -184,7 +190,7 @@ async fn batch_post_handler(
         operation: "store log batch",
         source,
     };
-    let mut inserter = state.client.inserter::<LogRow>("logs");
+    let mut inserter = state.client.inserter::<LogRow>(&state.table);
     for event in body {
         inserter
             .write(&LogRow::from(event))
