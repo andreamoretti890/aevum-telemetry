@@ -2,6 +2,7 @@ use super::*;
 use crate::models::log_event::LogLevel;
 use axum_test::{TestResponse, TestServer};
 use clickhouse::test::{Mock, handlers};
+use std::env;
 
 fn event() -> LogEvent {
     LogEvent::new(
@@ -19,6 +20,7 @@ fn event() -> LogEvent {
 fn mock_server(mock: &Mock) -> TestServer {
     TestServer::new(create_app(AppState {
         client: Client::default().with_url(mock.url()),
+        table: "logs".into(),
     }))
 }
 
@@ -100,6 +102,7 @@ async fn test_clickhouse_unreachable_returns_500() {
     drop(listener);
     let server = TestServer::new(create_app(AppState {
         client: Client::default().with_url(format!("http://{address}")),
+        table: "logs".into(),
     }));
     let response = server.get("/v1/logs").await;
     assert_api_error(
@@ -283,8 +286,8 @@ async fn clickhouse_logs_api() {
         .with_compression(clickhouse::Compression::Lz4)
         .with_setting("network_compression_method", "lz4")
         .with_url(env::var("CLICKHOUSE_URL").unwrap_or_else(|_| "http://127.0.0.1:8123".into()))
-        .with_user(read_env_var("CLICKHOUSE_USER"))
-        .with_password(read_env_var("CLICKHOUSE_PASSWORD"));
+        .with_user(env::var("CLICKHOUSE_USER").expect("CLICKHOUSE_USER must be set"))
+        .with_password(env::var("CLICKHOUSE_PASSWORD").expect("CLICKHOUSE_PASSWORD must be set"));
     let database = format!("_aevum_api_test_{}", std::process::id());
     client
         .query("CREATE DATABASE ?")
@@ -297,7 +300,7 @@ async fn clickhouse_logs_api() {
     let result = tokio::spawn(async move {
         test_client.query("CREATE TABLE logs (timestamp DateTime64(3, 'UTC'), level Enum8('trace' = 0, 'debug' = 1, 'info' = 2, 'warn' = 3, 'error' = 4), service String, message String, attributes String) ENGINE = MergeTree ORDER BY timestamp")
             .execute().await.unwrap();
-        let server = TestServer::new(create_app(AppState { client: test_client.clone() }));
+        let server = TestServer::new(create_app(AppState { client: test_client.clone(), table: "logs".into() }));
         let response = server.get("/v1/logs").await;
         response.assert_status_ok();
         response.assert_json(&Vec::<LogEvent>::new());
@@ -330,7 +333,7 @@ async fn clickhouse_logs_api() {
             response.assert_json(&expected);
         }
         drop(server);
-        let server = TestServer::new(create_app(AppState { client: test_client.clone() }));
+        let server = TestServer::new(create_app(AppState { client: test_client.clone(), table: "logs".into() }));
         let response = server.get("/v1/logs").await;
         response.assert_status_ok();
         response.assert_json(&expected);
