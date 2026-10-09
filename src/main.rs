@@ -3,8 +3,10 @@ mod models;
 
 use axum::{
     Json, Router,
-    extract::rejection::{JsonRejection, QueryRejection},
-    extract::{DefaultBodyLimit, Query, State},
+    extract::{
+        DefaultBodyLimit, Query, Request, State,
+        rejection::{JsonRejection, QueryRejection},
+    },
     http::StatusCode,
     routing::{get, post},
 };
@@ -12,6 +14,15 @@ use clickhouse::{Client, sql::Identifier};
 use serde_json::{Value, json};
 use std::net::SocketAddr;
 use tokio::net::TcpListener;
+use tower::ServiceBuilder;
+use tower_http::{
+    ServiceBuilderExt,
+    request_id::{MakeRequestId, RequestId},
+    trace::{DefaultMakeSpan, DefaultOnFailure, DefaultOnRequest, DefaultOnResponse, TraceLayer},
+};
+use tracing::Level;
+use tracing_subscriber::EnvFilter;
+use uuid::Uuid;
 
 use crate::models::log_event::{LogEvent, LogQuery, LogRowConversionError};
 use crate::models::log_row::LogRow;
@@ -20,7 +31,7 @@ use crate::{
     models::config::Config,
 };
 
-#[derive(Clone, Default)]
+#[derive(Clone, Default, Debug)]
 struct AppState {
     client: Client,
     table: String,
@@ -36,6 +47,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     tracing_subscriber::fmt()
         .json()
         .with_writer(std::io::stderr)
+        .with_env_filter(EnvFilter::try_from_default_env().unwrap_or_else(|_| "info".into()))
         .init();
 
     let client = Client::default()
@@ -59,7 +71,42 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
+#[derive(Clone, Default)]
+struct RequestUuid;
+
+impl MakeRequestId for RequestUuid {
+    fn make_request_id<B>(&mut self, _request: &Request<B>) -> Option<RequestId> {
+        let id = Uuid::new_v4().to_string();
+        Some(RequestId::new(id.parse().unwrap()))
+    }
+}
+
 fn create_app(state: AppState) -> Router {
+    let trace_layer = ServiceBuilder::new()
+        .set_x_request_id(RequestUuid)
+        .layer(
+            TraceLayer::new_for_http()
+                .make_span_with(DefaultMakeSpan::new().level(Level::INFO))
+                .make_span_with(|request: &Request<_>| {
+                    let request_id = request
+                        .headers()
+                        .get("x-request-id")
+                        .and_then(|value| value.to_str().ok())
+                        .unwrap_or("unknown");
+
+                    tracing::info_span!(
+                        "request",
+                        method = %request.method(),
+                        uri = %request.uri(),
+                        request_id = %request_id,
+                    )
+                })
+                .on_request(DefaultOnRequest::new().level(Level::INFO))
+                .on_response(DefaultOnResponse::new().level(Level::INFO))
+                .on_failure(DefaultOnFailure::new().level(Level::ERROR)),
+        )
+        .propagate_x_request_id();
+
     Router::new()
         .route("/health", get(health_handler))
         .route("/v1/logs", get(get_handler).post(post_handler))
@@ -68,6 +115,7 @@ fn create_app(state: AppState) -> Router {
         .method_not_allowed_fallback(|| async { ApiError::MethodNotAllowed })
         .with_state(state)
         .layer(DefaultBodyLimit::max(MAX_BODY_BYTES))
+        .layer(trace_layer)
 }
 
 async fn health_handler() -> Json<Value> {
@@ -91,6 +139,7 @@ async fn get_handler(
     if let Some(service) = &query.service {
         validate_service(service, None)?;
     }
+
     let mut sql = "SELECT ?fields FROM ? WHERE 1=1".to_string();
     if query.level.is_some() {
         sql.push_str(" AND level = ?");
@@ -138,6 +187,8 @@ async fn get_handler(
         .map(LogEvent::try_from)
         .collect::<Result<Vec<LogEvent>, LogRowConversionError>>()?;
 
+    tracing::info!(result_count = result.len(), "logs retrieved");
+
     Ok(Json(result))
 }
 
@@ -177,7 +228,8 @@ async fn batch_post_handler(
             event_index: None,
         });
     }
-    if body.len() > MAX_BATCH_EVENTS {
+    let body_len = body.len();
+    if body_len > MAX_BATCH_EVENTS {
         return Err(ApiError::BatchTooLarge {
             limit: MAX_BATCH_EVENTS,
         });
@@ -185,6 +237,8 @@ async fn batch_post_handler(
     for (index, event) in body.iter().enumerate() {
         validate_service(&event.service, Some(index))?;
     }
+
+    tracing::info!(event_count = body_len, "ingesting log batch");
 
     let storage_error = |source| ApiError::Storage {
         operation: "store log batch",

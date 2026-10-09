@@ -60,7 +60,7 @@ impl TryFrom<&LogRow> for LogEvent {
     }
 }
 
-#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
+#[derive(Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq)]
 #[serde(rename_all = "lowercase")]
 pub enum LogLevel {
     Trace,
@@ -101,7 +101,7 @@ impl TryFrom<i8> for LogLevel {
     }
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, Debug)]
 pub struct LogQuery {
     pub level: Option<LogLevel>,
     pub service: Option<String>,
