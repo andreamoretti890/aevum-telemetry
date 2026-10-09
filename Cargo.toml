@@ -24,3 +24,6 @@ url = "2.5.8"
 [dev-dependencies]
 axum-test = "21.1.0"
 clickhouse = { version = "0.15.2", features = ["test-util"] }
+
+[profile.release]
+debug = true

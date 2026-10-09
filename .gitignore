@@ -1,6 +1,13 @@
 # Rust build output
 /target/
 
+# Local benchmark artifacts
+/benchmarks/payloads/
+/benchmarks/results/
+/benchmarks/__pycache__/
+/profile.json.gz
+/profile.json.syms.json
+
 # Local ClickHouse credentials
 /.env
 

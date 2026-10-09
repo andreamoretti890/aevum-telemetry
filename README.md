@@ -124,6 +124,11 @@ Setup follows the [official ClickHouse Docker guide](https://clickhouse.com/docs
 
 See [ROADMAP.md](ROADMAP.md) for the planned milestones.
 
+## Performance baseline
+
+See [benchmarks/README.md](benchmarks/README.md) for local ingestion results
+and reproduction commands.
+
 ## License
 
 [MIT](LICENSE).
