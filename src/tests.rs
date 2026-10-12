@@ -130,6 +130,9 @@ async fn test_invalid_requests_do_not_access_clickhouse() {
     for query in [
         "level=invalid",
         "limit=-1",
+        "limit=many",
+        "from=invalid",
+        "to=invalid",
         "service=%20%20",
         "from=2026-10-07T09:00:00Z&to=2026-10-07T08:00:00Z",
     ] {
@@ -163,6 +166,46 @@ async fn test_invalid_requests_do_not_access_clickhouse() {
         StatusCode::UNSUPPORTED_MEDIA_TYPE,
         "invalid_request",
     );
+}
+
+#[tokio::test]
+async fn test_malformed_events_are_rejected_on_both_post_routes() {
+    let mock = Mock::new();
+    let server = mock_server(&mock);
+    for path in ["/v1/logs", "/v1/logs/batch"] {
+        for (field, value) in [
+            ("timestamp", Some(json!("not-a-timestamp"))),
+            ("level", Some(json!("critical"))),
+            ("attributes", Some(json!([]))),
+            ("service", None),
+        ] {
+            let mut invalid = serde_json::to_value(event()).unwrap();
+            match value {
+                Some(value) => invalid[field] = value,
+                None => {
+                    invalid.as_object_mut().unwrap().remove(field);
+                }
+            }
+            let payload = if path == "/v1/logs/batch" {
+                json!([invalid])
+            } else {
+                invalid
+            };
+            let response = server.post(path).json(&payload).await;
+            assert_api_error(
+                &response,
+                StatusCode::UNPROCESSABLE_ENTITY,
+                "invalid_request",
+            );
+        }
+        let malformed = if path == "/v1/logs/batch" { "[{" } else { "{" };
+        let response = server
+            .post(path)
+            .text(malformed)
+            .content_type("application/json")
+            .await;
+        assert_api_error(&response, StatusCode::BAD_REQUEST, "invalid_request");
+    }
 }
 
 #[tokio::test]
@@ -312,9 +355,8 @@ async fn clickhouse_logs_api() {
         ].into_iter().map(|(second, level, service)| {
             LogEvent::new(format!("2026-10-07T08:00:0{second}.123Z").parse().unwrap(), level, service, "Test", event().attributes)
         }).collect();
-        for event in &events {
-            server.post("/v1/logs").json(event).await.assert_status(StatusCode::CREATED);
-        }
+        server.post("/v1/logs").json(&events[0]).await.assert_status(StatusCode::CREATED);
+        server.post("/v1/logs/batch").json(&events[1..]).await.assert_status(StatusCode::CREATED);
         let rows = test_client.query("SELECT ?fields FROM logs ORDER BY timestamp DESC").fetch_all::<LogRow>().await.unwrap();
         let expected = vec![events[2].clone(), events[0].clone(), events[3].clone(), events[1].clone()];
         assert_eq!(rows.iter().map(LogEvent::try_from).collect::<Result<Vec<_>, _>>().unwrap(), expected);
@@ -337,6 +379,29 @@ async fn clickhouse_logs_api() {
         let response = server.get("/v1/logs").await;
         response.assert_status_ok();
         response.assert_json(&expected);
+        let timed_events: Vec<_> = [
+            (0, LogLevel::Debug, "window-service"),
+            (1, LogLevel::Debug, "window-service"),
+            (2, LogLevel::Info, "window-service"),
+            (2, LogLevel::Debug, "other-service"),
+            (3, LogLevel::Debug, "window-service"),
+            (4, LogLevel::Debug, "window-service"),
+        ].into_iter().map(|(second, level, service)| {
+            LogEvent::new(format!("2026-10-08T08:00:0{second}.123Z").parse().unwrap(), level, service, "Timed event", event().attributes)
+        }).collect();
+        server.post("/v1/logs/batch").json(&timed_events).await.assert_status(StatusCode::CREATED);
+        for (bounds, expected) in [
+            ("from=2026-10-08T08:00:01.123Z&to=2026-10-08T08:00:03.123Z&limit=10", vec![timed_events[4].clone(), timed_events[1].clone()]),
+            ("from=2026-10-08T08:00:01.123Z&to=2026-10-08T08:00:03.123Z&limit=1", vec![timed_events[4].clone()]),
+            ("from=2026-10-08T08:00:01.123Z", vec![timed_events[5].clone(), timed_events[4].clone(), timed_events[1].clone()]),
+            ("to=2026-10-08T08:00:03.123Z", vec![timed_events[4].clone(), timed_events[1].clone(), timed_events[0].clone()]),
+            ("from=2026-10-08T08:00:01.123Z&to=2026-10-08T08:00:01.123Z", vec![timed_events[1].clone()]),
+            ("from=2026-10-08T08:00:01.124Z&to=2026-10-08T08:00:02.999Z", vec![]),
+        ] {
+            let response = server.get(&format!("/v1/logs?service=window-service&level=debug&{bounds}")).await;
+            response.assert_status_ok();
+            response.assert_json(&expected);
+        }
         let mut insert = test_client.insert::<LogRow>("logs").await.unwrap();
         for index in 0..1001 {
             let mut row = LogRow::from(event());

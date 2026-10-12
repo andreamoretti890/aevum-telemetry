@@ -59,8 +59,10 @@ cargo test
 cargo clippy -- -D warnings
 ```
 
-`cargo test` runs the tests that need no database. To include the ClickHouse
-round-trip and API tests, start ClickHouse, then run:
+`cargo test` runs unit tests for models, configuration, query parsing, and error
+responses, plus API tests with mocked ClickHouse. No database is needed.
+To include the real ClickHouse round-trip and API tests, start the local Compose
+service, then run:
 
 ```sh
 set -a
@@ -70,9 +72,10 @@ cargo test -- --include-ignored
 ```
 
 The API test creates and removes a temporary database, so the test user needs
-permission to create databases. It checks storage, filters, ordering, limits,
-and reads after recreating the app. The default suite also checks HTTP 500
-responses when ClickHouse rejects requests or cannot be reached.
+permission to create databases. It checks single and batch writes, persisted
+reads, ordering, combined service/level/time filters, inclusive time bounds,
+limits, and reads after recreating the app. The default suite also checks HTTP
+500 responses when ClickHouse rejects requests or cannot be reached.
 
 ## Local ClickHouse
 

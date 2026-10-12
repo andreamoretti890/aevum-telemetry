@@ -145,3 +145,111 @@ pub enum ConfigError {
     #[error("invalid CLICKHOUSE_PASSWORD: {reason}")]
     InvalidClickhousePassword { reason: &'static str },
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::{net::Ipv4Addr, process::Command};
+
+    #[test]
+    fn validates_environment() {
+        // Child processes keep these cases isolated without mutating the test runner's environment.
+        if let Ok(expected) = env::var("AEVUM_CONFIG_TEST_EXPECT") {
+            let result = Config::from_env();
+            if let Some(name) = expected.strip_prefix("missing ") {
+                assert!(matches!(result, Err(ConfigError::Environment {
+                    name: variable, source: env::VarError::NotPresent,
+                }) if variable == name));
+                return;
+            }
+            match expected.as_str() {
+                "valid" => {
+                    let config = result.unwrap();
+                    assert_eq!(config.host, IpAddr::V4(Ipv4Addr::LOCALHOST));
+                    assert_eq!(config.port, 3000);
+                    assert_eq!(config.clickhouse_url, "http://127.0.0.1:8123");
+                    assert_eq!(config.clickhouse_db, "test_database");
+                    assert_eq!(config.clickhouse_table, "logs");
+                    assert_eq!(config.clickhouse_user, "test_user");
+                    assert_eq!(config.clickhouse_password, "test_password");
+                }
+                "AEVUM_HOST" => assert!(matches!(result, Err(ConfigError::InvalidHost { .. }))),
+                "AEVUM_PORT" => assert!(matches!(result, Err(ConfigError::InvalidPort { .. }))),
+                "CLICKHOUSE_URL" => assert!(matches!(
+                    result,
+                    Err(ConfigError::InvalidClickhouseUrl { .. })
+                )),
+                "CLICKHOUSE_DB" => assert!(matches!(
+                    result,
+                    Err(ConfigError::InvalidClickhouseDb { .. })
+                )),
+                "CLICKHOUSE_TABLE" => assert!(matches!(
+                    result,
+                    Err(ConfigError::InvalidClickhouseTable { .. })
+                )),
+                "CLICKHOUSE_USER" => assert!(matches!(
+                    result,
+                    Err(ConfigError::InvalidClickhouseUser { .. })
+                )),
+                "CLICKHOUSE_PASSWORD" => assert!(matches!(
+                    result,
+                    Err(ConfigError::InvalidClickhousePassword { .. })
+                )),
+                _ => panic!("unexpected configuration case: {expected}"),
+            }
+            return;
+        }
+
+        let variables = [
+            ("AEVUM_HOST", "127.0.0.1"),
+            ("AEVUM_PORT", "3000"),
+            ("CLICKHOUSE_URL", "http://127.0.0.1:8123"),
+            ("CLICKHOUSE_DB", "test_database"),
+            ("CLICKHOUSE_TABLE", "logs"),
+            ("CLICKHOUSE_USER", "test_user"),
+            ("CLICKHOUSE_PASSWORD", "test_password"),
+        ];
+        let check = |override_value: Option<(&str, Option<&str>)>, expected: &str| {
+            let mut command = Command::new(env::current_exe().unwrap());
+            command
+                .args(["--exact", "models::config::tests::validates_environment"])
+                .env_clear()
+                .envs(variables)
+                .env("AEVUM_CONFIG_TEST_EXPECT", expected);
+            if let Some((name, value)) = override_value {
+                match value {
+                    Some(value) => {
+                        command.env(name, value);
+                    }
+                    None => {
+                        command.env_remove(name);
+                    }
+                }
+            }
+            let output = command.output().unwrap();
+            assert!(
+                output.status.success(),
+                "configuration case {expected}:\n{}\n{}",
+                String::from_utf8_lossy(&output.stdout),
+                String::from_utf8_lossy(&output.stderr)
+            );
+            assert!(String::from_utf8_lossy(&output.stdout).contains("1 passed"));
+        };
+        check(None, "valid");
+        for (name, _) in variables {
+            check(Some((name, None)), &format!("missing {name}"));
+            check(Some((name, Some(""))), name);
+        }
+        for (name, value) in [
+            ("AEVUM_HOST", "localhost"),
+            ("AEVUM_PORT", "-1"),
+            ("AEVUM_PORT", "65536"),
+            ("AEVUM_PORT", "not-a-number"),
+            ("CLICKHOUSE_URL", "not-a-url"),
+            ("CLICKHOUSE_URL", "ftp://127.0.0.1:8123"),
+            ("CLICKHOUSE_URL", "http://"),
+        ] {
+            check(Some((name, Some(value))), name);
+        }
+    }
+}
